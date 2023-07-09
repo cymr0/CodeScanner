@@ -20,6 +20,8 @@ extension CodeScannerView {
         var codesFound = Set<String>()
         var didFinishScanning = false
         var lastTime = Date(timeIntervalSince1970: 0)
+        var lastCodeScanned: String = ""
+
         private let showViewfinder: Bool
         
         private var isGalleryShowing: Bool = false {
@@ -480,6 +482,12 @@ extension CodeScannerView {
                         
                     case .continuous:
                         if isPastScanInterval() {
+                            found(result)
+                        }
+
+                    case .whenDifferentToLastCode:
+                        if lastCodeScanned != stringValue {
+                            lastCodeScanned = stringValue
                             found(result)
                         }
                     }

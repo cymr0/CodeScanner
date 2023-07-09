@@ -55,6 +55,9 @@ public enum ScanMode {
 
     /// Scan only when capture button is tapped.
     case manual
+
+    /// Scan the code if it wasn't the last code scanned
+    case whenDifferentToLastCode
 }
 
 /// A SwiftUI view that is able to scan barcodes, QR codes, and more, and send back what was found.

@@ -488,11 +488,6 @@ extension CodeScannerView {
 
                     case .whenDifferentToLastCode:
                         if lastCodeScanned != stringValue {
-                            found(result)
-                        }
-
-                    case .whenDifferentToLastCode:
-                        if lastCodeScanned != stringValue {
                             lastCodeScanned = stringValue
                             found(result)
                         }

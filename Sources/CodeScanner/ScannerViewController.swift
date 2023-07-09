@@ -487,7 +487,7 @@ extension CodeScannerView {
                         }
 
                     case .whenDifferentToLastCode:
-                        if lastCodeScanned != stringValue {
+                        if lastCodeScanned != stringValue || Date().timeIntervalSince(lastTime) > 5 {
                             lastCodeScanned = stringValue
                             found(result)
                         }

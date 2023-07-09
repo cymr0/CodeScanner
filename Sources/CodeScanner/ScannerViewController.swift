@@ -482,6 +482,12 @@ extension CodeScannerView {
                         
                     case .continuous:
                         if isPastScanInterval() {
+                            lastCodeScanned = stringValue
+                            found(result)
+                        }
+
+                    case .whenDifferentToLastCode:
+                        if lastCodeScanned != stringValue {
                             found(result)
                         }
 

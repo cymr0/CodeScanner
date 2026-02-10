@@ -43,6 +43,7 @@ public struct CodeScannerView: UIViewControllerRepresentable {
     private let cameraConfiguration: CameraConfiguration
     private let isPaused: Bool
     private let isTorchOn: Bool
+    private let manualCaptureRequested: Bool
     private let simulatedData: String
     private let completion: @MainActor (Result<ScanResult, ScanError>) -> Void
 
@@ -70,6 +71,8 @@ public struct CodeScannerView: UIViewControllerRepresentable {
     ///   - cameraConfiguration: Camera hardware settings.
     ///   - isPaused: Temporarily pause scanning without tearing down the session.
     ///   - isTorchOn: Turn the device torch on or off.
+    ///   - manualCaptureRequested: Set to `true` to trigger a capture in `.manual`
+    ///     scan mode. Toggle back to `false` after the scan fires.
     ///   - simulatedData: Data returned when running in the iOS Simulator.
     ///   - completion: Called on the main actor with each scan result or error.
     public init(
@@ -82,6 +85,7 @@ public struct CodeScannerView: UIViewControllerRepresentable {
         cameraConfiguration: CameraConfiguration = .retail,
         isPaused: Bool = false,
         isTorchOn: Bool = false,
+        manualCaptureRequested: Bool = false,
         simulatedData: String = "",
         completion: @escaping @MainActor (Result<ScanResult, ScanError>) -> Void
     ) {
@@ -94,6 +98,7 @@ public struct CodeScannerView: UIViewControllerRepresentable {
         self.cameraConfiguration = cameraConfiguration
         self.isPaused = isPaused
         self.isTorchOn = isTorchOn
+        self.manualCaptureRequested = manualCaptureRequested
         self.simulatedData = simulatedData
         self.completion = completion
     }
@@ -110,7 +115,8 @@ public struct CodeScannerView: UIViewControllerRepresentable {
             requiresPhotoOutput: false,
             shouldVibrateOnSuccess: false,
             cameraConfiguration: cameraConfiguration,
-            isPaused: { [isPaused] in isPaused },
+            isPaused: isPaused,
+            simulatedData: simulatedData,
             completion: completion
         )
         #else
@@ -122,14 +128,20 @@ public struct CodeScannerView: UIViewControllerRepresentable {
             requiresPhotoOutput: requiresPhotoOutput,
             shouldVibrateOnSuccess: shouldVibrateOnSuccess,
             cameraConfiguration: cameraConfiguration,
-            isPaused: { [isPaused] in isPaused },
+            isPaused: isPaused,
+            simulatedData: simulatedData,
             completion: completion
         )
         #endif
     }
 
     public func updateUIViewController(_ controller: ScannerViewController, context: Context) {
+        controller.updatePaused(isPaused)
         controller.updateTorch(isTorchOn)
+
+        if manualCaptureRequested {
+            controller.triggerManualCapture()
+        }
     }
 }
 

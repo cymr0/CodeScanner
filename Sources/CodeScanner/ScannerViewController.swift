@@ -41,8 +41,11 @@ public final class ScannerViewController: UIViewController {
     private let requiresPhotoOutput: Bool
     private let shouldVibrateOnSuccess: Bool
     private let cameraConfiguration: CameraConfiguration
-    private let isPaused: () -> Bool
+    private let simulatedData: String
     private let completion: @MainActor (Result<ScanResult, ScanError>) -> Void
+
+    // Mutable state pushed from SwiftUI via updateUIViewController
+    private var currentlyPaused = false
 
     // MARK: - Initialiser
 
@@ -54,7 +57,8 @@ public final class ScannerViewController: UIViewController {
         requiresPhotoOutput: Bool = false,
         shouldVibrateOnSuccess: Bool = true,
         cameraConfiguration: CameraConfiguration = .retail,
-        isPaused: @escaping () -> Bool = { false },
+        isPaused: Bool = false,
+        simulatedData: String = "",
         completion: @escaping @MainActor (Result<ScanResult, ScanError>) -> Void
     ) {
         self.codeTypes = codeTypes
@@ -64,7 +68,8 @@ public final class ScannerViewController: UIViewController {
         self.requiresPhotoOutput = requiresPhotoOutput
         self.shouldVibrateOnSuccess = shouldVibrateOnSuccess
         self.cameraConfiguration = cameraConfiguration
-        self.isPaused = isPaused
+        self.currentlyPaused = isPaused
+        self.simulatedData = simulatedData
         self.completion = completion
         super.init(nibName: nil, bundle: nil)
     }
@@ -79,6 +84,9 @@ public final class ScannerViewController: UIViewController {
         super.viewDidLoad()
         view.backgroundColor = .black
 
+        #if targetEnvironment(simulator)
+        setupSimulatorView()
+        #else
         switch AVCaptureDevice.authorizationStatus(for: .video) {
         case .authorized:
             setupCaptureSession()
@@ -101,6 +109,7 @@ public final class ScannerViewController: UIViewController {
         @unknown default:
             break
         }
+        #endif
     }
 
     public override func viewWillAppear(_ animated: Bool) {
@@ -228,6 +237,17 @@ public final class ScannerViewController: UIViewController {
                 self?.applyAutoZoom(to: device, minimumCodeSize: cameraConfiguration.minimumCodeSize)
             }
 
+            // Apply torch setting from configuration
+            if cameraConfiguration.isTorchEnabled, device.hasTorch {
+                do {
+                    try device.lockForConfiguration()
+                    device.torchMode = .on
+                    device.unlockForConfiguration()
+                } catch {
+                    // Torch not critical; continue without it
+                }
+            }
+
             captureSession.commitConfiguration()
 
             // Switch back to MainActor for UI setup and session start
@@ -331,6 +351,7 @@ public final class ScannerViewController: UIViewController {
 
     // MARK: - Touch to Focus
 
+    #if !targetEnvironment(simulator)
     public override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
         guard let touch = touches.first,
               let device = cameraConfiguration.resolveDevice(),
@@ -349,6 +370,7 @@ public final class ScannerViewController: UIViewController {
             device.unlockForConfiguration()
         } catch { }
     }
+    #endif
 
     // MARK: - Public Methods
 
@@ -366,6 +388,12 @@ public final class ScannerViewController: UIViewController {
         lastScanTime = Date()
     }
 
+    /// Updates the paused state. Called from `updateUIViewController` so
+    /// SwiftUI state changes propagate live.
+    public func updatePaused(_ paused: Bool) {
+        currentlyPaused = paused
+    }
+
     /// Turns the device torch on or off.
     public func updateTorch(_ isOn: Bool) {
         guard let device = cameraConfiguration.resolveDevice(),
@@ -379,7 +407,7 @@ public final class ScannerViewController: UIViewController {
 
     private func handleMetadataObjects(_ metadataObjects: [AVMetadataObject]) {
         guard let metadataObject = metadataObjects.first,
-              !isPaused(),
+              !currentlyPaused,
               !didFinishScanning,
               !isCapturing,
               let readableObject = metadataObject as? AVMetadataMachineReadableCodeObject,
@@ -444,6 +472,39 @@ public final class ScannerViewController: UIViewController {
         completion(.success(result))
     }
 }
+
+// MARK: - Simulator Support
+
+#if targetEnvironment(simulator)
+extension ScannerViewController {
+    fileprivate func setupSimulatorView() {
+        let label = UILabel()
+        label.translatesAutoresizingMaskIntoConstraints = false
+        label.numberOfLines = 0
+        label.text = "Camera is not available in the Simulator.\nTap anywhere to return simulated data."
+        label.textAlignment = .center
+        label.textColor = .secondaryLabel
+        view.addSubview(label)
+
+        NSLayoutConstraint.activate([
+            label.leadingAnchor.constraint(equalTo: view.layoutMarginsGuide.leadingAnchor),
+            label.trailingAnchor.constraint(equalTo: view.layoutMarginsGuide.trailingAnchor),
+            label.centerYAnchor.constraint(equalTo: view.centerYAnchor)
+        ])
+    }
+
+    public override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+        guard !simulatedData.isEmpty else { return }
+        let result = ScanResult(
+            payload: simulatedData,
+            symbology: codeTypes.first ?? .ean13,
+            corners: [],
+            capturedImage: nil
+        )
+        reportSuccess(result)
+    }
+}
+#endif
 
 // MARK: - AVCaptureMetadataOutputObjectsDelegate
 

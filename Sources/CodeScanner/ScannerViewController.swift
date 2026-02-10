@@ -1,5 +1,5 @@
 //
-//  CodeScanner.swift
+//  ScannerViewController.swift
 //  https://github.com/twostraws/CodeScanner
 //
 //  Created by Paul Hudson on 14/12/2021.
@@ -7,598 +7,473 @@
 //
 
 #if os(iOS)
+import AudioToolbox
 import AVFoundation
 import UIKit
 
-@available(macCatalyst 14.0, *)
-extension CodeScannerView {
-    
-    public final class ScannerViewController: UIViewController, UINavigationControllerDelegate {
-        private let photoOutput = AVCapturePhotoOutput()
-        private var isCapturing = false
-        private var handler: ((UIImage?) -> Void)?
-        var parentView: CodeScannerView!
-        var codesFound = Set<String>()
-        var didFinishScanning = false
-        var lastTime = Date(timeIntervalSince1970: 0)
-        private let showViewfinder: Bool
-        
-        let fallbackVideoCaptureDevice = AVCaptureDevice.default(for: .video)
-        
-        private var isGalleryShowing: Bool = false {
-            didSet {
-                // Update binding
-                if parentView.isGalleryPresented.wrappedValue != isGalleryShowing {
-                    parentView.isGalleryPresented.wrappedValue = isGalleryShowing
-                }
-            }
-        }
+/// The core UIKit view controller that manages camera setup, barcode detection,
+/// and photo capture for the CodeScanner library.
+///
+/// This class is `@MainActor`-isolated and designed for iOS 16+ with Swift 6
+/// concurrency. All AVFoundation capture-session work that must leave the main
+/// thread is dispatched via `Task.detached`.
+@MainActor
+public final class ScannerViewController: UIViewController {
 
-        public init(showViewfinder: Bool = false, parentView: CodeScannerView) {
-            self.parentView = parentView
-            self.showViewfinder = showViewfinder
-            super.init(nibName: nil, bundle: nil)
-        }
+    // MARK: - Properties
 
-        required init?(coder: NSCoder) {
-            self.showViewfinder = false
-            super.init(coder: coder)
-        }
-        
-        func openGallery() {
-            isGalleryShowing = true
-            let imagePicker = UIImagePickerController()
-            imagePicker.delegate = self
-            imagePicker.presentationController?.delegate = self
-            present(imagePicker, animated: true, completion: nil)
-        }
-        
-        @objc func openGalleryFromButton(_ sender: UIButton) {
-            openGallery()
-        }
+    private let captureSession = AVCaptureSession()
+    private var previewLayer: AVCaptureVideoPreviewLayer?
+    private let metadataOutput = AVCaptureMetadataOutput()
+    private let photoOutput = AVCapturePhotoOutput()
 
-        #if targetEnvironment(simulator)
-        override public func loadView() {
-            view = UIView()
-            view.isUserInteractionEnabled = true
+    private var isCapturing = false
+    private var codesFound = Set<String>()
+    private var didFinishScanning = false
+    private var lastScanTime = Date(timeIntervalSince1970: 0)
+    private var photoHandler: ((UIImage?) -> Void)?
 
-            let label = UILabel()
-            label.translatesAutoresizingMaskIntoConstraints = false
-            label.numberOfLines = 0
-            label.text = "You're running in the simulator, which means the camera isn't available. Tap anywhere to send back some simulated data."
-            label.textAlignment = .center
+    // Configuration
+    private let codeTypes: [AVMetadataObject.ObjectType]
+    private let scanMode: ScanMode
+    private let scanInterval: Double
+    private let showViewfinder: Bool
+    private let requiresPhotoOutput: Bool
+    private let shouldVibrateOnSuccess: Bool
+    private let cameraConfiguration: CameraConfiguration
+    private let isPaused: () -> Bool
+    private let completion: @MainActor (Result<ScanResult, ScanError>) -> Void
 
-            let button = UIButton()
-            button.translatesAutoresizingMaskIntoConstraints = false
-            button.setTitle("Select a custom image", for: .normal)
-            button.setTitleColor(UIColor.systemBlue, for: .normal)
-            button.setTitleColor(UIColor.gray, for: .highlighted)
-            button.addTarget(self, action: #selector(openGalleryFromButton), for: .touchUpInside)
+    // MARK: - Initialiser
 
-            let stackView = UIStackView()
-            stackView.translatesAutoresizingMaskIntoConstraints = false
-            stackView.axis = .vertical
-            stackView.spacing = 50
-            stackView.addArrangedSubview(label)
-            stackView.addArrangedSubview(button)
+    public init(
+        codeTypes: [AVMetadataObject.ObjectType],
+        scanMode: ScanMode = .once,
+        scanInterval: Double = 2.0,
+        showViewfinder: Bool = false,
+        requiresPhotoOutput: Bool = false,
+        shouldVibrateOnSuccess: Bool = true,
+        cameraConfiguration: CameraConfiguration = .retail,
+        isPaused: @escaping () -> Bool = { false },
+        completion: @escaping @MainActor (Result<ScanResult, ScanError>) -> Void
+    ) {
+        self.codeTypes = codeTypes
+        self.scanMode = scanMode
+        self.scanInterval = scanInterval
+        self.showViewfinder = showViewfinder
+        self.requiresPhotoOutput = requiresPhotoOutput
+        self.shouldVibrateOnSuccess = shouldVibrateOnSuccess
+        self.cameraConfiguration = cameraConfiguration
+        self.isPaused = isPaused
+        self.completion = completion
+        super.init(nibName: nil, bundle: nil)
+    }
 
-            view.addSubview(stackView)
+    required init?(coder: NSCoder) {
+        fatalError("Use init(...) instead")
+    }
 
-            NSLayoutConstraint.activate([
-                button.heightAnchor.constraint(equalToConstant: 50),
-                stackView.leadingAnchor.constraint(equalTo: view.layoutMarginsGuide.leadingAnchor),
-                stackView.trailingAnchor.constraint(equalTo: view.layoutMarginsGuide.trailingAnchor),
-                stackView.centerYAnchor.constraint(equalTo: view.centerYAnchor)
-            ])
-        }
+    // MARK: - Lifecycle
 
-        override public func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
-            // Send back their simulated data, as if it was one of the types they were scanning for
-            found(ScanResult(
-                string: parentView.simulatedData,
-                type: parentView.codeTypes.first ?? .qr, image: nil, corners: []
-            ))
-        }
-        
-        #else
-        
-        var captureSession: AVCaptureSession?
-        var previewLayer: AVCaptureVideoPreviewLayer!
+    public override func viewDidLoad() {
+        super.viewDidLoad()
+        view.backgroundColor = .black
 
-        private lazy var viewFinder: UIImageView? = {
-            guard let image = UIImage(named: "viewfinder", in: .module, with: nil) else {
-                return nil
-            }
+        switch AVCaptureDevice.authorizationStatus(for: .video) {
+        case .authorized:
+            setupCaptureSession()
 
-            let imageView = UIImageView(image: image)
-            imageView.translatesAutoresizingMaskIntoConstraints = false
-            return imageView
-        }()
-        
-        private lazy var manualCaptureButton: UIButton = {
-            let button = UIButton(type: .system)
-            let image = UIImage(named: "capture", in: .module, with: nil)
-            button.setBackgroundImage(image, for: .normal)
-            button.addTarget(self, action: #selector(manualCapturePressed), for: .touchUpInside)
-            button.translatesAutoresizingMaskIntoConstraints = false
-            return button
-        }()
-
-        private lazy var manualSelectButton: UIButton = {
-            let button = UIButton(type: .system)
-            let image = UIImage(systemName: "photo.on.rectangle")
-            let background = UIImage(systemName: "capsule.fill")?.withTintColor(.systemBackground, renderingMode: .alwaysOriginal)
-            button.setImage(image, for: .normal)
-            button.setBackgroundImage(background, for: .normal)
-            button.addTarget(self, action: #selector(openGalleryFromButton), for: .touchUpInside)
-            button.translatesAutoresizingMaskIntoConstraints = false
-            return button
-        }()
-
-        override public func viewDidLoad() {
-            super.viewDidLoad()
-            self.addOrientationDidChangeObserver()
-            self.setBackgroundColor()
-            self.handleCameraPermission()
-        }
-
-        override public func viewWillLayoutSubviews() {
-            previewLayer?.frame = view.layer.bounds
-        }
-
-        @objc func updateOrientation() {
-            guard let orientation = view.window?.windowScene?.interfaceOrientation else { return }
-            guard let connection = captureSession?.connections.last, connection.isVideoOrientationSupported else { return }
-            switch orientation {
-            case .portrait:
-                connection.videoOrientation = .portrait
-            case .landscapeLeft:
-                connection.videoOrientation = .landscapeLeft
-            case .landscapeRight:
-                connection.videoOrientation = .landscapeRight
-            case .portraitUpsideDown:
-                connection.videoOrientation = .portraitUpsideDown
-            default:
-                connection.videoOrientation = .portrait
-            }
-        }
-
-        override public func viewDidAppear(_ animated: Bool) {
-            super.viewDidAppear(animated)
-            updateOrientation()
-        }
-
-        override public func viewWillAppear(_ animated: Bool) {
-            super.viewWillAppear(animated)
-
-            setupSession()
-        }
-      
-        private func setupSession() {
-            guard let captureSession else {
-                return
-            }
-            
-            if previewLayer == nil {
-                previewLayer = AVCaptureVideoPreviewLayer(session: captureSession)
-            }
-
-            previewLayer.frame = view.layer.bounds
-            previewLayer.videoGravity = .resizeAspectFill
-            view.layer.addSublayer(previewLayer)
-            addViewFinder()
-
-            reset()
-
-            if !captureSession.isRunning {
-                DispatchQueue.global(qos: .userInteractive).async {
-                    self.captureSession?.startRunning()
-                }
-            }
-        }
-
-        private func handleCameraPermission() {
-            switch AVCaptureDevice.authorizationStatus(for: .video) {
-                case .restricted:
-                    break
-                case .denied:
-                    self.didFail(reason: .permissionDenied)
-                case .notDetermined:
-                    self.requestCameraAccess {
-                        self.setupCaptureDevice()
-                        DispatchQueue.main.async {
-                            self.setupSession()
-                        }
+        case .notDetermined:
+            AVCaptureDevice.requestAccess(for: .video) { [weak self] granted in
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    if granted {
+                        self.setupCaptureSession()
+                    } else {
+                        self.completion(.failure(.cameraPermissionDenied))
                     }
-                case .authorized:
-                    self.setupCaptureDevice()
-                    self.setupSession()
-                    
-                default:
-                    break
-            }
-        }
-
-        private func requestCameraAccess(completion: (() -> Void)?) {
-            AVCaptureDevice.requestAccess(for: .video) { [weak self] status in
-                guard status else {
-                    self?.didFail(reason: .permissionDenied)
-                    return
                 }
-                completion?()
             }
-        }
-      
-        private func addOrientationDidChangeObserver() {
-            NotificationCenter.default.addObserver(
-                self,
-                selector: #selector(updateOrientation),
-                name: UIDevice.orientationDidChangeNotification,
-                object: nil
-            )
-        }
-      
-        private func setBackgroundColor(_ color: UIColor = .black) {
-            view.backgroundColor = color
-        }
-      
-        private func setupCaptureDevice() {
-            captureSession = AVCaptureSession()
 
-            guard let videoCaptureDevice = parentView.videoCaptureDevice ?? fallbackVideoCaptureDevice else {
+        case .denied, .restricted:
+            completion(.failure(.cameraPermissionDenied))
+
+        @unknown default:
+            break
+        }
+    }
+
+    public override func viewWillAppear(_ animated: Bool) {
+        super.viewWillAppear(animated)
+        startRunning()
+    }
+
+    public override func viewDidDisappear(_ animated: Bool) {
+        super.viewDidDisappear(animated)
+        stopRunning()
+    }
+
+    public override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        previewLayer?.frame = view.layer.bounds
+    }
+
+    // MARK: - Status Bar & Orientation
+
+    public override var prefersStatusBarHidden: Bool {
+        true
+    }
+
+    public override var supportedInterfaceOrientations: UIInterfaceOrientationMask {
+        .all
+    }
+
+    public override func viewWillTransition(
+        to size: CGSize,
+        with coordinator: UIViewControllerTransitionCoordinator
+    ) {
+        super.viewWillTransition(to: size, with: coordinator)
+        coordinator.animate { _ in
+            self.updateVideoOrientation()
+        }
+    }
+
+    // MARK: - Capture Session Setup
+
+    private func setupCaptureSession() {
+        let captureSession = self.captureSession
+        let metadataOutput = self.metadataOutput
+        let photoOutput = self.photoOutput
+        let codeTypes = self.codeTypes
+        let requiresPhotoOutput = self.requiresPhotoOutput
+        let cameraConfiguration = self.cameraConfiguration
+
+        Task.detached(priority: .userInitiated) { [weak self] in
+            captureSession.beginConfiguration()
+
+            captureSession.sessionPreset = .high
+
+            // Resolve camera device
+            guard let device = cameraConfiguration.resolveDevice() else {
+                captureSession.commitConfiguration()
+                await MainActor.run { [weak self] in
+                    self?.completion(.failure(.cameraUnavailable))
+                }
                 return
             }
 
+            // Create and add video input
             let videoInput: AVCaptureDeviceInput
-
             do {
-                videoInput = try AVCaptureDeviceInput(device: videoCaptureDevice)
+                videoInput = try AVCaptureDeviceInput(device: device)
             } catch {
-                didFail(reason: .initError(error))
-                return
-            }
-
-            if captureSession!.canAddInput(videoInput) {
-                captureSession!.addInput(videoInput)
-            } else {
-                didFail(reason: .badInput)
-                return
-            }
-            let metadataOutput = AVCaptureMetadataOutput()
-
-            if captureSession!.canAddOutput(metadataOutput) {
-                captureSession!.addOutput(metadataOutput)
-                captureSession!.addOutput(photoOutput)
-                metadataOutput.setMetadataObjectsDelegate(self, queue: DispatchQueue.main)
-                metadataOutput.metadataObjectTypes = parentView.codeTypes
-            } else {
-                didFail(reason: .badOutput)
-                return
-            }
-        }
-
-        private func addViewFinder() {
-            guard showViewfinder, let imageView = viewFinder else { return }
-
-            view.addSubview(imageView)
-
-            NSLayoutConstraint.activate([
-                imageView.centerYAnchor.constraint(equalTo: view.centerYAnchor),
-                imageView.centerXAnchor.constraint(equalTo: view.centerXAnchor),
-                imageView.widthAnchor.constraint(equalToConstant: 200),
-                imageView.heightAnchor.constraint(equalToConstant: 200),
-            ])
-        }
-
-        override public func viewDidDisappear(_ animated: Bool) {
-            super.viewDidDisappear(animated)
-
-            if captureSession?.isRunning == true {
-                DispatchQueue.global(qos: .userInteractive).async {
-                    self.captureSession?.stopRunning()
+                captureSession.commitConfiguration()
+                await MainActor.run { [weak self] in
+                    self?.completion(.failure(.initializationFailed(error.localizedDescription)))
                 }
+                return
             }
 
-            NotificationCenter.default.removeObserver(self)
-        }
+            guard captureSession.canAddInput(videoInput) else {
+                captureSession.commitConfiguration()
+                await MainActor.run { [weak self] in
+                    self?.completion(.failure(.invalidInput))
+                }
+                return
+            }
+            captureSession.addInput(videoInput)
 
-        override public var prefersStatusBarHidden: Bool {
-            true
-        }
+            // Add metadata output
+            guard captureSession.canAddOutput(metadataOutput) else {
+                captureSession.commitConfiguration()
+                await MainActor.run { [weak self] in
+                    self?.completion(.failure(.invalidOutput))
+                }
+                return
+            }
+            captureSession.addOutput(metadataOutput)
 
-        override public var supportedInterfaceOrientations: UIInterfaceOrientationMask {
-            .all
-        }
+            // Set delegate on main queue so callbacks arrive on main
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                metadataOutput.setMetadataObjectsDelegate(self, queue: .main)
+            }
 
-        /** Touch the screen for autofocus */
-        public override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
-            guard touches.first?.view == view,
-                  let touchPoint = touches.first,
-                  let device = parentView.videoCaptureDevice ?? fallbackVideoCaptureDevice,
-                  device.isFocusPointOfInterestSupported
-            else { return }
+            // Filter requested code types to those actually available
+            metadataOutput.metadataObjectTypes = codeTypes.filter {
+                metadataOutput.availableMetadataObjectTypes.contains($0)
+            }
 
-            let videoView = view
-            let screenSize = videoView!.bounds.size
-            let xPoint = touchPoint.location(in: videoView).y / screenSize.height
-            let yPoint = 1.0 - touchPoint.location(in: videoView).x / screenSize.width
-            let focusPoint = CGPoint(x: xPoint, y: yPoint)
+            // Optionally add photo output
+            if requiresPhotoOutput, captureSession.canAddOutput(photoOutput) {
+                captureSession.addOutput(photoOutput)
+            }
 
+            // Configure device for barcode scanning
             do {
                 try device.lockForConfiguration()
+                if device.isFocusModeSupported(cameraConfiguration.focusMode) {
+                    device.focusMode = cameraConfiguration.focusMode
+                }
+                if device.isFocusModeSupported(.autoFocus) {
+                    device.autoFocusRangeRestriction = .near
+                }
+                device.unlockForConfiguration()
             } catch {
-                return
+                // Focus configuration is not critical; continue without it
             }
 
-            // Focus to the correct point, make continuous focus and exposure so the point stays sharp when moving the device closer
-            device.focusPointOfInterest = focusPoint
-            device.focusMode = .continuousAutoFocus
-            device.exposurePointOfInterest = focusPoint
-            device.exposureMode = AVCaptureDevice.ExposureMode.continuousAutoExposure
+            // Apply auto-zoom if enabled
+            if cameraConfiguration.isAutoZoomEnabled {
+                self?.applyAutoZoom(to: device, minimumCodeSize: cameraConfiguration.minimumCodeSize)
+            }
+
+            captureSession.commitConfiguration()
+
+            // Switch back to MainActor for UI setup and session start
+            await MainActor.run { [weak self] in
+                self?.setupPreviewLayer()
+                self?.startRunning()
+            }
+        }
+    }
+
+    // MARK: - Auto Zoom
+
+    private nonisolated func applyAutoZoom(to device: AVCaptureDevice, minimumCodeSize: Float) {
+        let minFocusDistance = Float(device.minimumFocusDistance)
+        guard minFocusDistance > 0 else { return }
+
+        let fieldOfView = device.activeFormat.videoFieldOfView
+        let dimensions = CMVideoFormatDescriptionGetDimensions(device.activeFormat.formatDescription)
+        let rectWidth = Float(dimensions.height) / Float(dimensions.width)
+
+        let radians = (fieldOfView / 2) * .pi / 180
+        let filledCodeSize = minimumCodeSize / rectWidth
+        let minSubjectDistance = filledCodeSize / tan(radians)
+
+        guard minSubjectDistance < minFocusDistance else { return }
+
+        let zoomFactor = minFocusDistance / minSubjectDistance
+        do {
+            try device.lockForConfiguration()
+            device.videoZoomFactor = CGFloat(zoomFactor)
             device.unlockForConfiguration()
+        } catch {
+            // Zoom not critical, continue without it
         }
-        
-        @objc func manualCapturePressed(_ sender: Any?) {
-            self.readyManualCapture()
+    }
+
+    // MARK: - Preview Layer
+
+    private func setupPreviewLayer() {
+        let layer = AVCaptureVideoPreviewLayer(session: captureSession)
+        layer.frame = view.layer.bounds
+        layer.videoGravity = .resizeAspectFill
+        view.layer.addSublayer(layer)
+        previewLayer = layer
+
+        if showViewfinder {
+            addViewfinderOverlay()
         }
-        
-        func showManualCaptureButton(_ isManualCapture: Bool) {
-            if manualCaptureButton.superview == nil {
-                view.addSubview(manualCaptureButton)
-                NSLayoutConstraint.activate([
-                    manualCaptureButton.heightAnchor.constraint(equalToConstant: 60),
-                    manualCaptureButton.widthAnchor.constraint(equalTo: manualCaptureButton.heightAnchor),
-                    view.centerXAnchor.constraint(equalTo: manualCaptureButton.centerXAnchor),
-                    view.safeAreaLayoutGuide.bottomAnchor.constraint(equalTo: manualCaptureButton.bottomAnchor, constant: 32)
-                ])
-            }
-            
-            view.bringSubviewToFront(manualCaptureButton)
-            manualCaptureButton.isHidden = !isManualCapture
+    }
+
+    private func addViewfinderOverlay() {
+        let overlay = UIView()
+        overlay.translatesAutoresizingMaskIntoConstraints = false
+        overlay.layer.borderColor = UIColor.white.withAlphaComponent(0.7).cgColor
+        overlay.layer.borderWidth = 2
+        overlay.layer.cornerRadius = 12
+        overlay.backgroundColor = .clear
+        view.addSubview(overlay)
+
+        NSLayoutConstraint.activate([
+            overlay.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            overlay.centerYAnchor.constraint(equalTo: view.centerYAnchor),
+            overlay.widthAnchor.constraint(equalTo: view.widthAnchor, multiplier: 0.75),
+            overlay.heightAnchor.constraint(equalToConstant: 120)
+        ])
+    }
+
+    // MARK: - Session Control
+
+    private func startRunning() {
+        guard !captureSession.isRunning else { return }
+        Task.detached { [captureSession] in
+            captureSession.startRunning()
         }
-        
-        func showManualSelectButton(_ isManualSelect: Bool) {
-            if manualSelectButton.superview == nil {
-                view.addSubview(manualSelectButton)
-                NSLayoutConstraint.activate([
-                    manualSelectButton.heightAnchor.constraint(equalToConstant: 50),
-                    manualSelectButton.widthAnchor.constraint(equalToConstant: 60),
-                    view.centerXAnchor.constraint(equalTo: manualSelectButton.centerXAnchor),
-                    view.safeAreaLayoutGuide.bottomAnchor.constraint(equalTo: manualSelectButton.bottomAnchor, constant: 32)
-                ])
-            }
-            
-            view.bringSubviewToFront(manualSelectButton)
-            manualSelectButton.isHidden = !isManualSelect
+    }
+
+    private func stopRunning() {
+        guard captureSession.isRunning else { return }
+        Task.detached { [captureSession] in
+            captureSession.stopRunning()
         }
-        #endif
-        
-        func updateViewController(isTorchOn: Bool, isGalleryPresented: Bool, isManualCapture: Bool, isManualSelect: Bool) {
-            guard let videoCaptureDevice = parentView.videoCaptureDevice ?? fallbackVideoCaptureDevice else {
-                return
-            }
-            
-            if videoCaptureDevice.hasTorch {
-                try? videoCaptureDevice.lockForConfiguration()
-                videoCaptureDevice.torchMode = isTorchOn ? .on : .off
-                videoCaptureDevice.unlockForConfiguration()
-            }
-            
-            if isGalleryPresented, !isGalleryShowing {
-                openGallery()
-            }
-            
-            #if !targetEnvironment(simulator)
-            showManualCaptureButton(isManualCapture)
-            showManualSelectButton(isManualSelect)
-            #endif
+    }
+
+    // MARK: - Orientation
+
+    private func updateVideoOrientation() {
+        guard let connection = previewLayer?.connection,
+              connection.isVideoOrientationSupported,
+              let orientation = view.window?.windowScene?.interfaceOrientation else { return }
+
+        let videoOrientation: AVCaptureVideoOrientation
+        switch orientation {
+        case .portrait: videoOrientation = .portrait
+        case .landscapeLeft: videoOrientation = .landscapeLeft
+        case .landscapeRight: videoOrientation = .landscapeRight
+        case .portraitUpsideDown: videoOrientation = .portraitUpsideDown
+        @unknown default: videoOrientation = .portrait
         }
-        
-        public func reset() {
-            codesFound.removeAll()
-            didFinishScanning = false
-            lastTime = Date(timeIntervalSince1970: 0)
-        }
-        
-        public func readyManualCapture() {
-            guard parentView.scanMode.isManual else { return }
-            self.reset()
-            lastTime = Date()
+        connection.videoOrientation = videoOrientation
+    }
+
+    // MARK: - Touch to Focus
+
+    public override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+        guard let touch = touches.first,
+              let device = cameraConfiguration.resolveDevice(),
+              device.isFocusPointOfInterestSupported else { return }
+
+        let point = touch.location(in: view)
+        let focusPoint = previewLayer?.captureDevicePointConverted(fromLayerPoint: point)
+            ?? CGPoint(x: 0.5, y: 0.5)
+
+        do {
+            try device.lockForConfiguration()
+            device.focusPointOfInterest = focusPoint
+            device.focusMode = .autoFocus
+            device.exposurePointOfInterest = focusPoint
+            device.exposureMode = .autoExpose
+            device.unlockForConfiguration()
+        } catch { }
+    }
+
+    // MARK: - Public Methods
+
+    /// Resets the scanner so it can detect codes again.
+    public func reset() {
+        codesFound.removeAll()
+        didFinishScanning = false
+        lastScanTime = Date(timeIntervalSince1970: 0)
+    }
+
+    /// Triggers a manual capture window (only effective in `.manual` scan mode).
+    public func triggerManualCapture() {
+        guard scanMode.isManual else { return }
+        reset()
+        lastScanTime = Date()
+    }
+
+    /// Turns the device torch on or off.
+    public func updateTorch(_ isOn: Bool) {
+        guard let device = cameraConfiguration.resolveDevice(),
+              device.hasTorch else { return }
+        try? device.lockForConfiguration()
+        device.torchMode = isOn ? .on : .off
+        device.unlockForConfiguration()
+    }
+
+    // MARK: - Scan Handling
+
+    private func handleMetadataObjects(_ metadataObjects: [AVMetadataObject]) {
+        guard let metadataObject = metadataObjects.first,
+              !isPaused(),
+              !didFinishScanning,
+              !isCapturing,
+              let readableObject = metadataObject as? AVMetadataMachineReadableCodeObject,
+              let stringValue = readableObject.stringValue else { return }
+
+        let handler: (UIImage?) -> Void = { [weak self] image in
+            guard let self else { return }
+            let result = ScanResult(
+                payload: stringValue,
+                symbology: readableObject.type,
+                corners: readableObject.corners,
+                capturedImage: image
+            )
+            self.processResult(result)
         }
 
-        var isPastScanInterval: Bool {
-            Date().timeIntervalSince(lastTime) >= parentView.scanInterval
+        if requiresPhotoOutput {
+            isCapturing = true
+            photoHandler = handler
+            photoOutput.capturePhoto(with: AVCapturePhotoSettings(), delegate: self)
+        } else {
+            handler(nil)
         }
-        
-        var isWithinManualCaptureInterval: Bool {
-            Date().timeIntervalSince(lastTime) <= 0.5
-        }
+    }
 
-        func found(_ result: ScanResult) {
-            lastTime = Date()
+    private func processResult(_ result: ScanResult) {
+        switch scanMode {
+        case .once:
+            didFinishScanning = true
+            reportSuccess(result)
 
-            if parentView.shouldVibrateOnSuccess {
-                AudioServicesPlaySystemSound(SystemSoundID(kSystemSoundID_Vibrate))
+        case .manual:
+            if !didFinishScanning, Date().timeIntervalSince(lastScanTime) <= 0.5 {
+                didFinishScanning = true
+                reportSuccess(result)
             }
 
-            parentView.completion(.success(result))
-        }
+        case .oncePerCode:
+            if !codesFound.contains(result.payload) {
+                codesFound.insert(result.payload)
+                reportSuccess(result)
+            }
 
-        func didFail(reason: ScanError) {
-            DispatchQueue.main.async {
-                self.parentView.completion(.failure(reason))
+        case .continuous:
+            if Date().timeIntervalSince(lastScanTime) >= scanInterval {
+                reportSuccess(result)
+            }
+
+        case .continuousExcept(let ignoredList):
+            if Date().timeIntervalSince(lastScanTime) >= scanInterval,
+               !ignoredList.contains(result.payload) {
+                reportSuccess(result)
             }
         }
-        
+    }
+
+    private func reportSuccess(_ result: ScanResult) {
+        lastScanTime = Date()
+        if shouldVibrateOnSuccess {
+            AudioServicesPlaySystemSound(SystemSoundID(kSystemSoundID_Vibrate))
+        }
+        completion(.success(result))
     }
 }
 
 // MARK: - AVCaptureMetadataOutputObjectsDelegate
 
-@available(macCatalyst 14.0, *)
-extension CodeScannerView.ScannerViewController: AVCaptureMetadataOutputObjectsDelegate {
-    public func metadataOutput(_ output: AVCaptureMetadataOutput, didOutput metadataObjects: [AVMetadataObject], from connection: AVCaptureConnection) {
-
-
-        guard let metadataObject = metadataObjects.first,
-              !parentView.isPaused,
-              !didFinishScanning,
-              !isCapturing,
-              let readableObject = metadataObject as? AVMetadataMachineReadableCodeObject,
-              let stringValue = readableObject.stringValue else {
-
-            return
+extension ScannerViewController: AVCaptureMetadataOutputObjectsDelegate {
+    nonisolated public func metadataOutput(
+        _ output: AVCaptureMetadataOutput,
+        didOutput metadataObjects: [AVMetadataObject],
+        from connection: AVCaptureConnection
+    ) {
+        Task { @MainActor [weak self] in
+            self?.handleMetadataObjects(metadataObjects)
         }
-
-        handler = { [weak self] image in
-            guard let self else { return }
-            let result = ScanResult(string: stringValue, type: readableObject.type, image: image, corners: readableObject.corners)
-
-            switch parentView.scanMode {
-            case .once:
-                found(result)
-                // make sure we only trigger scan once per use
-                didFinishScanning = true
-
-            case .manual:
-                if !didFinishScanning, isWithinManualCaptureInterval {
-                    found(result)
-                    didFinishScanning = true
-                }
-
-            case .oncePerCode:
-                if !codesFound.contains(stringValue) {
-                    codesFound.insert(stringValue)
-                    found(result)
-                }
-
-            case .continuous:
-                if isPastScanInterval {
-                    found(result)
-                }
-
-            case .continuousExcept(let ignoredList):
-                if isPastScanInterval, !ignoredList.contains(stringValue) {
-                    found(result)
-                }
-            }
-        }
-
-        if parentView.requiresPhotoOutput {
-            isCapturing = true
-            photoOutput.capturePhoto(with: AVCapturePhotoSettings(), delegate: self)
-        } else {
-            handler?(nil)
-        }
-    }
-}
-
-// MARK: - UIImagePickerControllerDelegate
-
-@available(macCatalyst 14.0, *)
-extension CodeScannerView.ScannerViewController: UIImagePickerControllerDelegate {
-    public func imagePickerController(_ picker: UIImagePickerController, didFinishPickingMediaWithInfo info: [UIImagePickerController.InfoKey: Any]) {
-        isGalleryShowing = false
-
-        defer {
-            dismiss(animated: true)
-        }
-
-        guard let qrcodeImg = info[.originalImage] as? UIImage,
-              let detector = CIDetector(ofType: CIDetectorTypeQRCode, context: nil, options: [CIDetectorAccuracy: CIDetectorAccuracyHigh]),
-              let ciImage = CIImage(image:qrcodeImg) else {
-
-            return
-        }
-
-        let features = detector.features(in: ciImage)
-
-        guard !features.isEmpty else {
-            didFail(reason: .badOutput)
-            return
-        } 
-        for feature in features.compactMap({ $0 as? CIQRCodeFeature }) {
-            guard let qrCodeLink = feature.messageString, !qrCodeLink.isEmpty else {
-                didFail(reason: .badOutput)
-                continue
-            }
-
-            let corners = [
-                feature.bottomLeft,
-                feature.bottomRight,
-                feature.topRight,
-                feature.topLeft
-            ]
-
-            let result = ScanResult(string: qrCodeLink, type: .qr, image: qrcodeImg, corners: corners)
-            found(result)
-        }
-    }
-
-    public func imagePickerControllerDidCancel(_ picker: UIImagePickerController) {
-        isGalleryShowing = false
-        dismiss(animated: true)
-    }
-}
-
-// MARK: - UIAdaptivePresentationControllerDelegate
-
-@available(macCatalyst 14.0, *)
-extension CodeScannerView.ScannerViewController: UIAdaptivePresentationControllerDelegate {
-    public func presentationControllerDidDismiss(_ presentationController: UIPresentationController) {
-        // Gallery is no longer being presented
-        isGalleryShowing = false
     }
 }
 
 // MARK: - AVCapturePhotoCaptureDelegate
 
-@available(macCatalyst 14.0, *)
-extension CodeScannerView.ScannerViewController: AVCapturePhotoCaptureDelegate {
-    
-    public func photoOutput(
+extension ScannerViewController: AVCapturePhotoCaptureDelegate {
+    nonisolated public func photoOutput(
         _ output: AVCapturePhotoOutput,
         didFinishProcessingPhoto photo: AVCapturePhoto,
         error: Error?
     ) {
-        isCapturing = false
-        guard let imageData = photo.fileDataRepresentation() else {
-            print("Error while generating image from photo capture data.");
-            return
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            self.isCapturing = false
+            let image = photo.fileDataRepresentation().flatMap { UIImage(data: $0) }
+            self.photoHandler?(image)
+            self.photoHandler = nil
         }
-        guard let qrImage = UIImage(data: imageData) else {
-            print("Unable to generate UIImage from image data.");
-            return
-        }
-        handler?(qrImage)
     }
-    
-    public func photoOutput(
-        _ output: AVCapturePhotoOutput,
-        willCapturePhotoFor resolvedSettings: AVCaptureResolvedPhotoSettings
-    ) {
-        AudioServicesDisposeSystemSoundID(1108)
-    }
-    
-    public func photoOutput(
-        _ output: AVCapturePhotoOutput,
-        didCapturePhotoFor resolvedSettings: AVCaptureResolvedPhotoSettings
-    ) {
-        AudioServicesDisposeSystemSoundID(1108)
-    }
-    
-}
-
-// MARK: - AVCaptureDevice
-
-@available(macCatalyst 14.0, *)
-public extension AVCaptureDevice {
-    
-    /// This returns the Ultra Wide Camera on capable devices and the default Camera for Video otherwise.
-    static var bestForVideo: AVCaptureDevice? {
-        let deviceHasUltraWideCamera = !AVCaptureDevice.DiscoverySession(deviceTypes: [.builtInUltraWideCamera], mediaType: .video, position: .back).devices.isEmpty
-        return deviceHasUltraWideCamera ? AVCaptureDevice.default(.builtInUltraWideCamera, for: .video, position: .back) : AVCaptureDevice.default(for: .video)
-    }
-    
 }
 #endif

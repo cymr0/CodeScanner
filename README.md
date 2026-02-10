@@ -1,87 +1,142 @@
 # CodeScanner
 
 <p>
-    <img src="https://img.shields.io/badge/iOS-13.0+-blue.svg" />
-    <img src="https://img.shields.io/badge/Swift-5.1-ff69b4.svg" />
-    <a href="https://twitter.com/twostraws">
-        <img src="https://img.shields.io/badge/Contact-@twostraws-lightgrey.svg?style=flat" alt="Twitter: @twostraws" />
-    </a>
+    <img src="https://img.shields.io/badge/iOS-16.0+-blue.svg" />
+    <img src="https://img.shields.io/badge/Swift-6.0-ff69b4.svg" />
 </p>
 
-CodeScanner is a SwiftUI framework that makes it easy to scan codes such as QR codes and barcodes. It provides a view struct, `CodeScannerView`, that can be shown inside a sheet so that all scanning occurs in one place.
+CodeScanner is a modern SwiftUI library for scanning barcodes and QR codes. It is **optimised for retail barcode scanning** out of the box, with sensible defaults that cover EAN-13, EAN-8, UPC-E, Code 128, and Code 39 — the symbologies found on virtually every retail product worldwide.
 
-> Looking for a Compose Multiplaform libray? We also built it! [Discover the Compose Multiplatform CodeScanner library](https://github.com/guimauvedigital/codescanner)
+Originally forked from [twostraws/CodeScanner](https://github.com/twostraws/CodeScanner), then modernised with Swift 6 concurrency, `Sendable` types, `@MainActor` isolation, and retail-focused defaults.
 
-## Basic usage
+## Features
 
-You should create an instance of `CodeScannerView` with at least two parameters: an array of the types to scan for, and a closure that will be called when a result is ready.
+- Retail-optimised defaults (EAN-13, UPC, Code 128, Code 39)
+- Swift 6 strict concurrency throughout
+- `@MainActor`-isolated view controller with off-main-thread capture session setup
+- Auto-zoom for small barcode readability
+- Tap-to-focus for precise targeting
+- Continuous scanning mode for high-throughput retail workflows
+- Code-drawn viewfinder overlay (no image assets required)
+- Preset barcode type collections (`BarcodeType.retail`, `.allBarcodes`, `.all2D`, `.all`)
+- Configurable camera selection (wide, ultra-wide, auto, custom)
+- Privacy manifest included
 
-Your completion closure must accept a `Result<ScanResult, ScanError>`, where the success case is the code string and type that was found. For example, if you asked to scan for QR codes and bar codes, you might be told that a QR code containing the email address paul@hackingwithswift.com was found.
+## Requirements
 
-If things go wrong, your result will contain a `ScanError` set to one of these three cases:
+- iOS 16.0+
+- Swift 6.0+
+- Xcode 16.0+
 
-- `badInput`, if the camera cannot be accessed
-- `badOutput`, if the camera is not capable of detecting codes
-- `initError`, if initialization failed.
+## Installation
 
-**Important:** iOS *requires* you to add the "Privacy - Camera Usage Description" key to your Info.plist file, providing a reason for why you want to access the camera.
+### Swift Package Manager
 
-
-## Customization options
-
-You can provide a variety of extra customization options to `CodeScannerView` in its initializer:
-
-- `scanMode` can be `.once` to scan a single code, `.oncePerCode` to scan many codes but only trigger finding each unique code once, and `.continuous` will keep finding codes until you dismiss the scanner. Default: `.once`.
-- `scanInterval` controls how fast individual codes should be scanned (in seconds) when running in `.continuous` scan mode.
-- `showViewfinder` determines whether to show a box-like viewfinder over the UI. Default: false.
-- `simulatedData` allows you to provide some test data to use in Simulator, when real scanning isn’t available. Default: an empty string.
-- `shouldVibrateOnSuccess` allows you to determine whether device should vibrate when a code is found. Default: true.
-- `videoCaptureDevice` allows you to choose different capture device that is most suitable for code to scan.
-- `isTorchOn` turns on/off the phone’s torch/flashlight. Default: `false`
-
-If you want to add UI customization, such as a dedicated Cancel button, you should wrap your `CodeScannerView` instance in a `NavigationView` and use a `toolbar()` modifier to add whatever buttons you want.
-
-
-## Examples
-
-Here's some example code to create a QR code-scanning view that prints the code that was found or any error. If it's used in the simulator it will return a name, because that's provided as the simulated data:
+Add CodeScanner to your project via SPM:
 
 ```swift
-CodeScannerView(codeTypes: [.qr], simulatedData: "Paul Hudson") { response in                    
-    switch response {
-    case .success(let result):
-        print("Found code: \(result.string)")
+dependencies: [
+    .package(url: "https://github.com/cymr0/CodeScanner.git", branch: "main")
+]
+```
+
+## Quick Start
+
+The simplest usage — scan retail barcodes with one line:
+
+```swift
+CodeScannerView { result in
+    switch result {
+    case .success(let scan):
+        print("Scanned: \(scan.payload) (\(scan.symbology))")
     case .failure(let error):
-        print(error.localizedDescription)
+        print("Error: \(error.localizedDescription)")
     }
 }
 ```
 
-Your completion closure is probably where you want to dismiss the `CodeScannerView`.
+This uses all retail defaults: continuous scanning, EAN-13/UPC/Code 128/Code 39 detection, 1-second scan interval, viewfinder overlay, and wide-angle camera with auto-zoom.
 
-Here's an example on how to present the QR code-scanning view as a sheet and how the scanned barcode can be passed to the next view in a `NavigationView`:
+## Configuration
+
+### Barcode Type Presets
 
 ```swift
-struct QRCodeScannerExampleView: View {
+// Retail products (EAN-13, EAN-8, UPC-E, Code 128, Code 39)
+CodeScannerView(codeTypes: BarcodeType.retail) { ... }
+
+// All 1D barcodes (adds Code 93, ITF-14, Interleaved 2of5, Codabar, etc.)
+CodeScannerView(codeTypes: BarcodeType.allBarcodes) { ... }
+
+// 2D codes only (QR, PDF417, DataMatrix, Aztec)
+CodeScannerView(codeTypes: BarcodeType.all2D) { ... }
+
+// Everything
+CodeScannerView(codeTypes: BarcodeType.all) { ... }
+```
+
+### Scan Modes
+
+```swift
+// Scan once and stop
+CodeScannerView(scanMode: .once) { ... }
+
+// Each unique code triggers once
+CodeScannerView(scanMode: .oncePerCode) { ... }
+
+// Continuous scanning (default for retail)
+CodeScannerView(scanMode: .continuous, scanInterval: 1.0) { ... }
+
+// Continuous but skip known codes
+CodeScannerView(scanMode: .continuousExcept(ignoredList: ["123456"]), scanInterval: 1.0) { ... }
+
+// Manual trigger only
+CodeScannerView(scanMode: .manual) { ... }
+```
+
+### Camera Configuration
+
+```swift
+// Use the retail preset (default)
+CodeScannerView(cameraConfiguration: .retail) { ... }
+
+// Custom configuration
+var config = CameraConfiguration.retail
+config.isTorchEnabled = true
+config.preferredCamera = .ultraWide
+config.minimumCodeSize = 15  // mm
+
+CodeScannerView(cameraConfiguration: config) { ... }
+```
+
+### Full Example
+
+```swift
+struct ScannerScreen: View {
     @State private var isPresentingScanner = false
-    @State private var scannedCode: String?
+    @State private var lastScannedCode: String?
 
     var body: some View {
-        VStack(spacing: 10) {
-            if let code = scannedCode {
-                NavigationLink("Next page", destination: NextView(scannedCode: code), isActive: .constant(true)).hidden()
+        VStack(spacing: 20) {
+            if let code = lastScannedCode {
+                Text("Last scan: \(code)")
+                    .font(.headline)
             }
 
-            Button("Scan Code") {
+            Button("Scan Barcode") {
                 isPresentingScanner = true
             }
-
-            Text("Scan a QR code to begin")
         }
         .sheet(isPresented: $isPresentingScanner) {
-            CodeScannerView(codeTypes: [.qr]) { response in
-                if case let .success(result) = response {
-                    scannedCode = result.string
+            CodeScannerView(
+                codeTypes: BarcodeType.retail,
+                scanMode: .continuous,
+                scanInterval: 1.0,
+                showViewfinder: true,
+                isTorchOn: false
+            ) { result in
+                if case let .success(scan) = result {
+                    lastScannedCode = scan.payload
                     isPresentingScanner = false
                 }
             }
@@ -90,38 +145,39 @@ struct QRCodeScannerExampleView: View {
 }
 ```
 
-## Scanning small QR codes
-
-Scanning small QR code on devices with dual or tripple cameras has to be adjusted because of minimum focus distance built in these cameras.
-To have the best possible focus on the code we scan it is needed to choose the most suitable camera and apply recommended zoom factor.
-
-Example for scanning 20x20mm QR codes.
+### Checking Barcode Type
 
 ```swift
-CodeScannerView(codeTypes: [.qr], videoCaptureDevice: AVCaptureDevice.zoomedCameraForQRCode(withMinimumCodeSize: 20)) { response in                    
-    switch response {
-    case .success(let result):
-        print("Found code: \(result.string)")
-    case .failure(let error):
-        print(error.localizedDescription)
+CodeScannerView { result in
+    if case let .success(scan) = result {
+        if scan.isBarcode {
+            print("1D barcode: \(scan.payload)")
+        } else {
+            print("2D code: \(scan.payload)")
+        }
     }
 }
 ```
 
+**Important:** iOS requires you to add the "Privacy - Camera Usage Description" key to your Info.plist file.
+
+## API Reference
+
+| Type | Description |
+|------|-------------|
+| `CodeScannerView` | Main SwiftUI view — drop-in barcode scanner |
+| `ScanResult` | Decoded payload, symbology, corners, optional image |
+| `ScanError` | Error cases: camera unavailable, permission denied, etc. |
+| `ScanMode` | Scanning behaviour: once, oncePerCode, continuous, manual |
+| `BarcodeType` | Preset symbology collections for common use cases |
+| `CameraConfiguration` | Camera hardware settings (lens, focus, zoom, torch) |
+| `CameraSelection` | Which physical camera to use |
+| `ScannerViewController` | Underlying UIKit controller (for advanced use) |
 
 ## Credits
 
-CodeScanner was made by [Paul Hudson](https://twitter.com/twostraws), who writes [free Swift tutorials over at Hacking with Swift](https://www.hackingwithswift.com), and is now maintained by [Nathan Fallet](https://nathanfallet.me). It’s available under the MIT license, which permits commercial use, modification, distribution, and private use.
-
+Originally created by [Paul Hudson](https://twitter.com/twostraws). Modernised for Swift 6 and retail barcode scanning.
 
 ## License
 
-MIT License.
-
-Copyright (c) 2021 Paul Hudson
-
-Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+MIT License. See [LICENSE](LICENSE) for details.

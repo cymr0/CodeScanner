@@ -27,6 +27,7 @@ public final class ScannerViewController: UIViewController {
     private let metadataOutput = AVCaptureMetadataOutput()
     private let photoOutput = AVCapturePhotoOutput()
 
+    private var isSessionConfigured = false
     private var isCapturing = false
     private var codesFound = Set<String>()
     private var didFinishScanning = false
@@ -252,6 +253,7 @@ public final class ScannerViewController: UIViewController {
 
             // Switch back to MainActor for UI setup and session start
             await MainActor.run { [weak self] in
+                self?.isSessionConfigured = true
                 self?.setupPreviewLayer()
                 self?.startRunning()
             }
@@ -318,7 +320,7 @@ public final class ScannerViewController: UIViewController {
     // MARK: - Session Control
 
     private func startRunning() {
-        guard !captureSession.isRunning else { return }
+        guard isSessionConfigured, !captureSession.isRunning else { return }
         Task.detached { [captureSession] in
             captureSession.startRunning()
         }

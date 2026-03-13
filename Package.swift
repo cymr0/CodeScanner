@@ -1,4 +1,4 @@
-// swift-tools-version:6.0
+// swift-tools-version:5.9
 import PackageDescription
 
 let package = Package(
@@ -17,9 +17,6 @@ let package = Package(
             path: "Sources/CodeScanner",
             resources: [
                 .copy("PrivacyInfo.xcprivacy")
-            ],
-            swiftSettings: [
-                .enableExperimentalFeature("StrictConcurrency")
             ]
         )
     ]

@@ -276,7 +276,7 @@ public final class ScannerViewController: UIViewController {
 
         guard minSubjectDistance < minFocusDistance else { return }
 
-        let zoomFactor = minFocusDistance / minSubjectDistance
+        let zoomFactor = min(minFocusDistance / minSubjectDistance, 2.0)
         do {
             try device.lockForConfiguration()
             device.videoZoomFactor = CGFloat(zoomFactor)

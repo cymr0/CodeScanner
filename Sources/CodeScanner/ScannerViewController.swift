@@ -52,8 +52,8 @@ public final class ScannerViewController: UIViewController {
 
     public init(
         codeTypes: [AVMetadataObject.ObjectType],
-        scanMode: ScanMode = .once,
-        scanInterval: Double = 2.0,
+        scanMode: ScanMode = .continuous,
+        scanInterval: Double = 1.5,
         showViewfinder: Bool = false,
         requiresPhotoOutput: Bool = false,
         shouldVibrateOnSuccess: Bool = true,

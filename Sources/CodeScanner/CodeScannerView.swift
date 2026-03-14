@@ -55,8 +55,8 @@ public struct CodeScannerView: UIViewControllerRepresentable {
     /// - `codeTypes` covers EAN-13, EAN-8, UPC-E, Code 128, and Code 39.
     /// - `scanMode` is `.continuous` so retail workers can scan many items in
     ///   quick succession.
-    /// - `scanInterval` is `1.0` second — faster than the original library
-    ///   default of 2.0 seconds.
+    /// - `scanInterval` is `1.5` seconds — a comfortable pace for scanning
+    ///   items in quick succession.
     /// - `requiresPhotoOutput` is `false` for faster throughput when a captured
     ///   image is not needed.
     ///
@@ -78,7 +78,7 @@ public struct CodeScannerView: UIViewControllerRepresentable {
     public init(
         codeTypes: [AVMetadataObject.ObjectType] = BarcodeType.retail,
         scanMode: ScanMode = .continuous,
-        scanInterval: Double = 1.0,
+        scanInterval: Double = 1.5,
         showViewfinder: Bool = true,
         requiresPhotoOutput: Bool = false,
         shouldVibrateOnSuccess: Bool = true,
